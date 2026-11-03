@@ -6,6 +6,17 @@ Windows 바탕화면에서 ChatGPT와 Claude 구독 사용량이 얼마나 남�
 
 ![위젯 화면](docs/screenshot.png)
 
+## 쉬운 설치 (추천)
+
+1. **[AiUsageWidget-Setup.exe 내려받기](https://github.com/yeseogu18/ai-usage-widget/releases/latest/download/AiUsageWidget-Setup.exe)**
+2. 내려받은 파일을 실행합니다. `Windows의 PC 보호` 창이 뜨면 `추가 정보`를 누른 뒤 `실행`을 누르세요. 서명이 없는 개인 프로그램이라 처음 한 번 뜹니다.
+3. 설치가 끝나면 바탕화면 오른쪽 위에 위젯이 뜹니다. ChatGPT, Claude 줄을 각각 클릭해서 로그인하세요.
+
+- 설치 위치: `%LOCALAPPDATA%\Programs\AiUsageWidget` (관리자 권한 필요 없음)
+- 시작 메뉴에 `AI 사용량 위젯`이 생기고, Windows를 켜면 자동으로 실행됩니다. (위젯 우클릭 메뉴에서 끌 수 있음)
+- 새 버전도 같은 방법으로 받아 실행하면 덮어써서 업데이트됩니다. 로그인 정보는 그대로 남습니다.
+- 제거: 위젯 우클릭 → `제거`, 또는 Windows 설정 → 앱 → 설치된 앱 → `AI 사용량 위젯` → 제거
+
 ## 기능
 
 - 서비스별 남은 사용량(%)을 배터리 모양으로 표시 (50% 이상 초록, 20~49% 주황, 20% 미만 빨강)
@@ -22,7 +33,7 @@ Windows 바탕화면에서 ChatGPT와 Claude 구독 사용량이 얼마나 남�
 - Microsoft Edge WebView2 런타임 (대부분의 Windows에 이미 설치되어 있음)
 - 각 서비스의 사용량 화면에 사용 한도가 표시되는 ChatGPT 또는 Claude 계정
 
-## 설치
+## 직접 빌드 (개발자용)
 
 1. 이 저장소를 내려받습니다. (초록색 Code 버튼 → Download ZIP → 압축 풀기, 또는 git clone)
 2. 압축을 푼 폴더에서 PowerShell을 열고 아래 명령을 실행합니다.
@@ -32,7 +43,7 @@ Windows 바탕화면에서 ChatGPT와 Claude 구독 사용량이 얼마나 남�
    ```
 
    처음 한 번은 Microsoft WebView2 SDK를 NuGet에서 내려받은 뒤 `AiUsageWidget.exe`를 만듭니다.
-3. `AiUsageWidget.exe`를 실행합니다. 주 모니터 오른쪽 위에 위젯이 나타납니다.
+3. `AiUsageWidget.exe`를 실행합니다. DLL이 옆에 있는 폴더에서는 설치 없이 그 자리에서 바로 실행되고, 주 모니터 오른쪽 위에 위젯이 나타납니다. 만들어진 exe 하나만 다른 곳에 두고 실행하면 위의 쉬운 설치와 같이 동작합니다.
 
 ## 처음 실행과 로그인
 
@@ -71,7 +82,8 @@ Windows 바탕화면에서 ChatGPT와 Claude 구독 사용량이 얼마나 남�
 
 ## 제거
 
-우클릭 메뉴에서 `Windows 시작 시 자동 실행`을 끄고 `종료`한 뒤 폴더를 지우면 됩니다.
+- 쉬운 설치로 설치한 경우: 위젯 우클릭 → `제거`, 또는 Windows 설정 → 앱 → 설치된 앱에서 제거
+- 직접 빌드한 경우: 우클릭 메뉴에서 `Windows 시작 시 자동 실행`을 끄고 `종료`한 뒤 폴더를 지우면 됩니다.
 
 ## 만든 방법
 
@@ -87,7 +99,8 @@ MIT
 
 An unofficial Windows desktop widget that shows how much of your ChatGPT (Codex/Work plan limit) and Claude subscription usage is left, like a phone battery. Not affiliated with or endorsed by OpenAI or Anthropic.
 
-1. Build: `powershell -ExecutionPolicy Bypass -File src\build.ps1` (downloads the Microsoft WebView2 SDK from NuGet on first run)
+1. Easy install: download [AiUsageWidget-Setup.exe](https://github.com/yeseogu18/ai-usage-widget/releases/latest/download/AiUsageWidget-Setup.exe) and run it (unsigned, so Windows asks once: More info, Run anyway). It installs to `%LOCALAPPDATA%\Programs\AiUsageWidget`, adds a Start menu entry and starts with Windows. Uninstall from the widget's right-click menu or Windows Settings, Apps.
+   Or build: `powershell -ExecutionPolicy Bypass -File src\build.ps1` (downloads the Microsoft WebView2 SDK from NuGet on first run)
 2. Run `AiUsageWidget.exe` and click a row to sign in (email code sign-in is recommended; Google sign-in may be blocked inside embedded browsers)
 3. Sign-in data stays in the local `data\webview` folder and is never uploaded. The widget only stores the usage numbers in `data\state.json`.
 

@@ -1,6 +1,7 @@
 ﻿# AI 사용량 위젯 빌드
 # 저장소 폴더에서 실행:  powershell -ExecutionPolicy Bypass -File src\build.ps1
 # 결과: 저장소 폴더에 AiUsageWidget.exe (+ Microsoft WebView2 DLL 3개)
+# exe 안에도 DLL 3개를 넣어 두므로, exe 하나만 따로 실행하면 설치 파일처럼 동작한다
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $src  = $PSScriptRoot
@@ -33,6 +34,9 @@ if (-not (Test-Path $icon)) { $icon = Join-Path $src 'app.ico' }
 & $csc /nologo /target:winexe /platform:x64 /optimize+ /codepage:65001 `
     "/out:$root\AiUsageWidget.exe" "/win32icon:$icon" "/win32manifest:$src\app.manifest" `
     /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll `
+    "/resource:$root\Microsoft.Web.WebView2.Core.dll,payload.Microsoft.Web.WebView2.Core.dll" `
+    "/resource:$root\Microsoft.Web.WebView2.WinForms.dll,payload.Microsoft.Web.WebView2.WinForms.dll" `
+    "/resource:$root\WebView2Loader.dll,payload.WebView2Loader.dll" `
     "/r:$root\Microsoft.Web.WebView2.Core.dll" "/r:$root\Microsoft.Web.WebView2.WinForms.dll" `
     "$src\AiUsageWidget.cs"
 if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)" }

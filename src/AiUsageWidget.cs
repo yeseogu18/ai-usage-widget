@@ -16,6 +16,8 @@ using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -36,7 +38,22 @@ namespace AiUsageWidget
         public static readonly int Pid = Process.GetCurrentProcess().Id;
         public const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         public const string RunName = "AiUsageWidget";
+        public const string Version = "1.0.0";
+        public const string RepoUrl = "https://github.com/yeseogu18/ai-usage-widget";
+        public const string MutexName = @"Local\AiUsageWidget.v1";
+        public const string QuitEventName = @"Local\AiUsageWidget.quit";
         static readonly object logLock = new object();
+
+        // 떠 있는 위젯(어느 폴더에서 실행됐든)에 종료를 요청한다
+        public static void SignalQuitEvent()
+        {
+            try { using (EventWaitHandle e = new EventWaitHandle(false, EventResetMode.AutoReset, QuitEventName)) e.Set(); } catch { }
+        }
+
+        public static void ResetQuitEvent()
+        {
+            try { using (EventWaitHandle e = new EventWaitHandle(false, EventResetMode.AutoReset, QuitEventName)) e.Reset(); } catch { }
+        }
 
         public static string DataDir { get { return Path.Combine(Root, "data"); } }
         public static string AssetDir { get { return Path.Combine(Root, "assets"); } }
@@ -93,13 +110,19 @@ namespace AiUsageWidget
 
         public static void SetAutoRun(bool on)
         {
+            if (on) { SetAutoRunPath(Application.ExecutablePath); return; }
             try
             {
-                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RunKey))
-                {
-                    if (on) k.SetValue(RunName, "\"" + Application.ExecutablePath + "\"");
-                    else k.DeleteValue(RunName, false);
-                }
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RunKey)) k.DeleteValue(RunName, false);
+            }
+            catch (Exception ex) { Log("autorun: " + ex.Message); }
+        }
+
+        public static void SetAutoRunPath(string exePath)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(RunKey)) k.SetValue(RunName, "\"" + exePath + "\"");
             }
             catch (Exception ex) { Log("autorun: " + ex.Message); }
         }
@@ -787,6 +810,8 @@ namespace AiUsageWidget
         IntPtr fgHook = IntPtr.Zero;
         IntPtr desktopHost = IntPtr.Zero;
         Bitmap lastFrame;
+        EventWaitHandle quitEvent;
+        RegisteredWaitHandle quitWait;
 
         public WidgetForm()
         {
@@ -858,6 +883,7 @@ namespace AiUsageWidget
                 RenderNow();
             });
             menu.Items.Add(new ToolStripSeparator());
+            if (Installer.IsInstalledCopy()) menu.Items.Add("제거 (프로그램 삭제)", null, delegate { Installer.LaunchUninstall(); });
             menu.Items.Add("종료", null, delegate { Close(); });
             menu.Opening += delegate
             {
@@ -904,7 +930,16 @@ namespace AiUsageWidget
             cmdTimer.Tick += delegate { ProcessCommands(); };
             cmdTimer.Start();
             SystemEvents.PowerModeChanged += OnPowerMode;
-            App.Log("start pid=" + App.Pid + " scale=" + dpiScale.ToString("0.00", CultureInfo.InvariantCulture) + " pos=" + Left + "," + Top);
+            try
+            {
+                quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, App.QuitEventName);
+                quitWait = ThreadPool.RegisterWaitForSingleObject(quitEvent, delegate(object st, bool timedOut)
+                {
+                    try { BeginInvoke(new Action(delegate { Close(); })); } catch { }
+                }, null, -1, false);
+            }
+            catch (Exception ex) { App.Log("quit event: " + ex.Message); }
+            App.Log("start v" + App.Version + " pid=" + App.Pid + " scale=" + dpiScale.ToString("0.00", CultureInfo.InvariantCulture) + " pos=" + Left + "," + Top);
         }
 
         protected override void OnShown(EventArgs e)
@@ -1470,6 +1505,12 @@ namespace AiUsageWidget
             closing = true;
             try { SystemEvents.PowerModeChanged -= OnPowerMode; } catch { }
             try { if (fgHook != IntPtr.Zero) UnhookWinEvent(fgHook); } catch { }
+            try
+            {
+                if (quitWait != null) quitWait.Unregister(null);
+                if (quitEvent != null) quitEvent.Dispose();
+            }
+            catch { }
             try { if (loginForm != null && !loginForm.IsDisposed) loginForm.Close(); } catch { }
             try
             {
@@ -1510,6 +1551,273 @@ namespace AiUsageWidget
         }
     }
 
+    // 내려받은 파일 하나로 설치·제거하기
+    // - 실행 파일 옆에 WebView2 DLL이 없으면(내려받은 설치 파일) 설치 모드: %LOCALAPPDATA%\Programs\AiUsageWidget에 설치하고 위젯을 띄운다
+    // - DLL이 옆에 있으면(설치된 위젯, 직접 빌드한 위젯) 그냥 위젯을 띄운다
+    static class Installer
+    {
+        public const string Title = "AI 사용량 위젯";
+        const string ExeName = "AiUsageWidget.exe";
+        const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\AiUsageWidget";
+        static readonly string[] Dlls = { "Microsoft.Web.WebView2.Core.dll", "Microsoft.Web.WebView2.WinForms.dll", "WebView2Loader.dll" };
+
+        public static string InstallDir
+        {
+            get { return Path.Combine(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs"), "AiUsageWidget"); }
+        }
+
+        static string StartMenuLink
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), Title + ".lnk"); }
+        }
+
+        static bool SamePath(string a, string b)
+        {
+            try { return string.Equals(Path.GetFullPath(a).TrimEnd('\\'), Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }
+        }
+
+        public static bool IsInstalledCopy() { return SamePath(App.Root, InstallDir); }
+
+        static bool DllsBesideExe()
+        {
+            foreach (string d in Dlls) if (!File.Exists(Path.Combine(App.Root, d))) return false;
+            return true;
+        }
+
+        static bool HasPayload()
+        {
+            Assembly asm = Assembly.GetExecutingAssembly();
+            foreach (string d in Dlls) if (asm.GetManifestResourceInfo("payload." + d) == null) return false;
+            return true;
+        }
+
+        // true: 설치·제거 모드로 처리를 끝냄 (위젯은 띄우지 않음)
+        public static bool Handle(string[] args)
+        {
+            if (args.Length >= 1 && args[0] == "--uninstall") { Uninstall(); return true; }
+            if (args.Length >= 2 && args[0] == "--install-to") { InstallTo(args[1], true); return true; }   // 시험용: 지정 폴더에 파일만 풀기
+            if (DllsBesideExe()) return false;
+            if (!HasPayload())
+            {
+                MessageBox.Show("실행에 필요한 파일(Microsoft WebView2 DLL)을 찾지 못했어요.", Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return true;
+            }
+            InstallTo(InstallDir, false);
+            return true;
+        }
+
+        static void WriteWithRetry(string path, byte[] data)
+        {
+            for (int i = 0; ; i++)
+            {
+                try { File.WriteAllBytes(path, data); return; }
+                catch (IOException) { if (i >= 20) throw; Thread.Sleep(500); }
+                catch (UnauthorizedAccessException) { if (i >= 20) throw; Thread.Sleep(500); }
+            }
+        }
+
+        static void InstallTo(string dir, bool dry)
+        {
+            string target = Path.Combine(dir, ExeName);
+            try
+            {
+                Directory.CreateDirectory(dir);
+                if (!dry) StopRunning(dir);
+                // 파일을 새로 써서 '인터넷에서 받은 파일' 표시가 설치본에 남지 않게 한다
+                if (!SamePath(Application.ExecutablePath, target)) WriteWithRetry(target, File.ReadAllBytes(Application.ExecutablePath));
+                Assembly asm = Assembly.GetExecutingAssembly();
+                foreach (string d in Dlls)
+                {
+                    using (Stream s = asm.GetManifestResourceStream("payload." + d))
+                    using (MemoryStream ms = new MemoryStream())
+                    {
+                        if (s == null) throw new InvalidOperationException(d + " missing");
+                        s.CopyTo(ms);
+                        WriteWithRetry(Path.Combine(dir, d), ms.ToArray());
+                    }
+                }
+                if (dry)
+                {
+                    CreateShortcut(Path.Combine(dir, "test.lnk"), target, dir);
+                    File.WriteAllText(Path.Combine(dir, "install-test.txt"), "ok", App.Utf8);
+                    return;
+                }
+                CreateShortcut(StartMenuLink, target, dir);
+                App.SetAutoRunPath(target);
+                RegisterUninstall(target, dir);
+                ProcessStartInfo psi = new ProcessStartInfo(target);
+                psi.UseShellExecute = true;
+                psi.WorkingDirectory = dir;
+                Process.Start(psi);
+                MessageBox.Show(
+                    "AI 사용량 위젯을 설치했어요.\n\n" +
+                    "1. 바탕화면 오른쪽 위에 위젯이 떠 있어요.\n" +
+                    "2. ChatGPT, Claude 줄을 각각 클릭해서 로그인하세요.\n" +
+                    "    (구글 로그인보다 이메일 인증 코드 로그인을 추천해요)\n" +
+                    "3. 시작 메뉴의 'AI 사용량 위젯'으로 다시 열 수 있고,\n" +
+                    "    Windows를 켜면 자동으로 실행돼요.\n" +
+                    "4. 끄거나 제거하려면 위젯을 마우스 오른쪽 버튼으로 클릭하세요.",
+                    Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                if (dry)
+                {
+                    try { File.WriteAllText(Path.Combine(dir, "install-test.txt"), "fail " + ex, App.Utf8); } catch { }
+                    return;
+                }
+                MessageBox.Show("설치하지 못했어요.\n" + ex.Message, Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // 설치 폴더에서 실행 중인 위젯을 끝내고 기다린다 (파일 교체·삭제 전)
+        static void StopRunning(string dir)
+        {
+            string cmdFile = Path.Combine(Path.Combine(dir, "data"), "cmd.txt");
+            App.SignalQuitEvent();
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(cmdFile));
+                File.WriteAllText(cmdFile, "quit", App.Utf8);
+            }
+            catch { }
+            try
+            {
+                using (Mutex m = new Mutex(false, App.MutexName))
+                {
+                    bool got = false;
+                    try { got = m.WaitOne(15000); }
+                    catch (AbandonedMutexException) { got = true; }
+                    if (got) m.ReleaseMutex();
+                }
+            }
+            catch { }
+            App.ResetQuitEvent();
+            try { if (File.Exists(cmdFile)) File.Delete(cmdFile); } catch { }
+            foreach (Process p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(ExeName)))
+            {
+                try
+                {
+                    if (p.Id == App.Pid) continue;
+                    string f = p.MainModule.FileName;
+                    if (f.StartsWith(dir, StringComparison.OrdinalIgnoreCase) && !p.WaitForExit(5000)) p.Kill();
+                }
+                catch { }
+            }
+        }
+
+        static void CreateShortcut(string lnkPath, string target, string workDir)
+        {
+            Type t = Type.GetTypeFromProgID("WScript.Shell");
+            object shell = Activator.CreateInstance(t);
+            try
+            {
+                object sc = t.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { lnkPath });
+                Type st = sc.GetType();
+                st.InvokeMember("TargetPath", BindingFlags.SetProperty, null, sc, new object[] { target });
+                st.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, sc, new object[] { workDir });
+                st.InvokeMember("Description", BindingFlags.SetProperty, null, sc, new object[] { "ChatGPT·Claude 남은 사용량을 바탕화면에 배터리처럼 표시" });
+                st.InvokeMember("IconLocation", BindingFlags.SetProperty, null, sc, new object[] { target + ",0" });
+                st.InvokeMember("Save", BindingFlags.InvokeMethod, null, sc, null);
+                Marshal.FinalReleaseComObject(sc);
+            }
+            finally { Marshal.FinalReleaseComObject(shell); }
+        }
+
+        // Windows 설정 → 앱 목록에 표시 (거기서 제거 가능)
+        static void RegisterUninstall(string exe, string dir)
+        {
+            using (RegistryKey k = Registry.CurrentUser.CreateSubKey(UninstallKey))
+            {
+                k.SetValue("DisplayName", Title);
+                k.SetValue("DisplayIcon", exe + ",0");
+                k.SetValue("DisplayVersion", App.Version);
+                k.SetValue("Publisher", "yeseogu18");
+                k.SetValue("InstallLocation", dir);
+                k.SetValue("UninstallString", "\"" + exe + "\" --uninstall");
+                k.SetValue("URLInfoAbout", App.RepoUrl);
+                k.SetValue("NoModify", 1, RegistryValueKind.DWord);
+                k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+            }
+        }
+
+        public static void LaunchUninstall()
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(Application.ExecutablePath, "--uninstall");
+                psi.UseShellExecute = false;
+                Process.Start(psi);
+            }
+            catch (Exception ex) { App.Log("uninstall launch: " + ex.Message); }
+        }
+
+        static void Uninstall()
+        {
+            if (!IsInstalledCopy())
+            {
+                MessageBox.Show("설치된 위젯(시작 메뉴의 AI 사용량 위젯)에서만 제거할 수 있어요.", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (MessageBox.Show("AI 사용량 위젯을 제거할까요?\n위젯에 저장된 로그인 정보도 함께 지워져요.", Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            string dir = InstallDir;
+            StopRunning(dir);
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(App.RunKey, true))
+                {
+                    if (k != null)
+                    {
+                        string v = k.GetValue(App.RunName) as string;
+                        if (v != null && v.IndexOf(dir, StringComparison.OrdinalIgnoreCase) >= 0) k.DeleteValue(App.RunName, false);
+                    }
+                }
+            }
+            catch { }
+            try { if (File.Exists(StartMenuLink)) File.Delete(StartMenuLink); } catch { }
+            try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, false); } catch { }
+            MessageBox.Show("제거했어요.", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            ScheduleDelete(dir);
+        }
+
+        // 이 프로그램이 끝난 뒤 설치 폴더를 지운다 (최대 약 30초 재시도)
+        static void ScheduleDelete(string dir)
+        {
+            try
+            {
+                string q = "\"" + dir + "\"";
+                ProcessStartInfo psi = new ProcessStartInfo("cmd.exe", "/c for /l %i in (1,1,30) do @(if exist " + q + " (rmdir /s /q " + q + " 2>nul & ping -n 2 127.0.0.1 >nul))");
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                Process.Start(psi);
+            }
+            catch { }
+        }
+    }
+
+    // 시험용: WebView2 DLL을 실제로 불러올 수 있는지 확인
+    static class SelfTest
+    {
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static int Run(string[] args)
+        {
+            string outFile = args.Length >= 2 ? args[1] : Path.Combine(App.Root, "selftest.txt");
+            try
+            {
+                string v = CoreWebView2Environment.GetAvailableBrowserVersionString();
+                File.WriteAllText(outFile, "ok webview2=" + v + " app=" + App.Version + " installedCopy=" + Installer.IsInstalledCopy(), App.Utf8);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                try { File.WriteAllText(outFile, "fail " + ex.GetType().Name + ": " + ex.Message, App.Utf8); } catch { }
+                return 1;
+            }
+        }
+    }
+
     static class Program
     {
         [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
@@ -1521,6 +1829,7 @@ namespace AiUsageWidget
             if (args.Length >= 3 && args[0] == "--render-test") return RenderTest.Run(args);
             if (args.Length >= 1 && (args[0] == "--quit" || args[0] == "--refresh"))
             {
+                if (args[0] == "--quit") App.SignalQuitEvent();
                 try
                 {
                     Directory.CreateDirectory(App.DataDir);
@@ -1529,22 +1838,33 @@ namespace AiUsageWidget
                 catch { }
                 return 0;
             }
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            if (args.Length >= 1 && args[0] == "--selftest") return SelfTest.Run(args);
+            if (Installer.Handle(args)) return 0;
+            return RunWidget();
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static int RunWidget()
+        {
             bool created;
-            Mutex mtx = new Mutex(true, @"Local\AiUsageWidget.v1", out created);
+            Mutex mtx = new Mutex(true, App.MutexName, out created);
             if (!created)
             {
                 // 이미 떠 있으면 새로 실행한 쪽이 이어받는다: 기존 위젯에 종료를 요청하고 기다린다
+                App.SignalQuitEvent();
                 try { Directory.CreateDirectory(App.DataDir); File.WriteAllText(App.CmdPath, "quit", App.Utf8); } catch { }
                 bool got = false;
                 try { got = mtx.WaitOne(15000); }
                 catch (AbandonedMutexException) { got = true; }
+                App.ResetQuitEvent();
+                try { if (File.Exists(App.CmdPath)) File.Delete(App.CmdPath); } catch { }
                 if (!got) { App.Log("takeover timeout"); return 0; }
                 App.Log("takeover from previous instance");
             }
             try
             {
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
                 Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { App.Log("thread exception: " + e.Exception); };
                 AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { App.Log("unhandled: " + e.ExceptionObject); };
                 Application.Run(new WidgetForm());
